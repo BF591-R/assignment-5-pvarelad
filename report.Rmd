@@ -39,7 +39,31 @@ seen in the reference report.
 
 ```{r, warning=FALSE, message=FALSE, echo=FALSE}
 #Read in verse_counts.tsv and sample_metadata.csv and subset to the listed samples
-#Store these dataframes in a SummarizedExperiment object and display the summary here
+verse_counts <- readr::read_tsv("data/verse_counts.tsv") %>%
+  tibble::column_to_rownames(var = "gene")
+
+sample_metadata <- readr::read_csv("data/sample_metadata.csv")
+
+# Define samples of interest
+samples_of_interest <- c("vP0_1", "vP0_2", "vAd_1", "vAd_2")
+
+# Subset both to only the samples of interest
+
+sample_metadata_subset <- sample_metadata %>%
+  dplyr::filter(samplename %in% samples_of_interest) 
+
+
+counts_subset <- verse_counts %>%
+  dplyr::select(dplyr::all_of(samples_of_interest))
+
+# Build SummarizedExperiment object
+se <- SummarizedExperiment::SummarizedExperiment(
+  assays  = list(counts = as.matrix(counts_subset)),
+  colData = sample_metadata_subset
+)
+# Display summary
+se
+
 
 ```
 
@@ -47,7 +71,7 @@ Display the colData from your SummarizedExperiment object here:
 
 ```{r, echo=FALSE}
 #Display the sample data from your SE object here to make sure the order is right 
-
+SummarizedExperiment::colData(se)
 ```
 
 ## 2. [Running DESeq2](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#differential-expression-analysis)
@@ -65,8 +89,12 @@ analysis (referred to as the dds in the vignette)
 
 ```{r, run deseq2, echo=FALSE}
 #Run your DESeq2 function here which returns a list of the dds and the results
+deseq_results <- return_deseq_res(se,~ timepoint)
+
 #Assign the results and the dds from the returned list to their own variables 
 #for ease of use
+dds <- deseq_results$dds
+res <- deseq_results$results
 
 ```
 
@@ -82,8 +110,9 @@ user-defined threshold for padj and set it at .10.
 
 ```{r, label results tibble, echo=FALSE}
 #Label the results with the column as specified above
+labeled_results <- label_res(res, padj_threshold = 0.10)
 #Display the summary of the tibble
-
+labeled_results
 ```
 
 ### Captions for figures
@@ -107,7 +136,28 @@ components of the plot.
 
 ```{r, raw pval histogram, echo=FALSE, warning=FALSE, fig.cap = caption_4}
 #Histogram of raw p-values for all discovered genes
+# Plot histogram of raw p-values
+pval_histogram <- labeled_results %>%
+  dplyr::filter(!is.na(pvalue)) %>%
+  ggplot2::ggplot(ggplot2::aes(x = pvalue)) +
+  ggplot2::geom_histogram(bins = 30,
+                           fill = "steelblue",
+                           color = "white",
+                           alpha = 0.8) +
+  ggplot2::labs(
+    title = "Distribution of Raw P-Values from DESeq2 Results",
+    subtitle = "All genes discovered in the experiment",
+    x = "Raw P-Value",
+    y = "Count"
+  ) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    plot.title    = ggplot2::element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = ggplot2::element_text(hjust = 0.5),
+    axis.title    = ggplot2::element_text(face = "bold")
+  )
 
+pval_histogram
 ```
 
 ## 5. Plotting the LogFoldChanges for differentially expressed genes
@@ -119,7 +169,9 @@ label any appropriate axes and components of the plot.
 
 ```{r, log2fc DE genes histogram, echo=FALSE, fig.cap = caption_5}
 #Histogram of log2FC values for significant DE genes with padj (FDR) < .10
+log2fc_histogram <- plot_log2fc(labeled_results, padj_threshold = 0.10)
 
+log2fc_histogram
 ```
 
 ## 6. Plotting the normalized counts of differentially expressed genes
@@ -131,6 +183,9 @@ jitter plot of the counts and label each by their samplenames.
 ```{r, plot of normalized counts, echo=FALSE, fig.cap = caption_6}
 #Make a scatter/jitter plot of the norm counts for the top ten DE genes ranked
 #by padj
+norm_counts_plot <- scatter_norm_counts(labeled_results, dds, num_genes = 10)
+
+norm_counts_plot
 
 ```
 
@@ -142,6 +197,9 @@ DESeq2 results and color the points appropriately.
 ```{r, volcano plot, echo=FALSE, warning=FALSE, fig.cap = caption_7}
 #Volcano Plot (scatter plot with log2FC on x-axis and -log10(padj) on y-axis)
 #Color points (genes) by status defined in part 3
+volcano <- plot_volcano(labeled_results)
+
+volcano
 
 ```
 
@@ -159,19 +217,23 @@ sets file.
 
 ```{r, generate ranked list of log2FC}
 #first load in the id2gene.txt appropriately
-#add a new column in your labeled results that matches IDs to symbols
-#generate a named vector of symbols and log2FC values in descending order
+
+rnk_list <- make_ranked_log2fc(labeled_results, "data/id2gene.txt")
+
+# Then add gene symbols to labeled results separately
+labeled_results <- labeled_results %>%
+  dplyr::left_join(id2gene, by = c("genes" = "ensembl_id"))
 
 ```
 
 ```{r, this is the "top" of our ranked list}
 #use head to display the top of the list
-
+head(rnk_list)
 ```
 
 ```{r, this is the "bottom" of our ranked list}
 #use tail to display the bottom of the list
-
+tail(rnk_list)
 ```
 
 Perform a GSEA using a ranked list log2FoldChange values for all genes
@@ -182,15 +244,26 @@ pathways file in an appropriate format for `fgsea`. Otherwise, run fgsea using
 default parameters and the `fgsea()` function.
 
 ```{r, actually run fgsea, warning=FALSE, message=FALSE, echo=FALSE}
-#Run fgsea using a ranked list of descending log2FC against the C2 canonical
-#pathways gene set
-#Set minsize to 15 and maxsize to 500, leave the other parameters as defaults
+
+# Run fgsea against C2 canonical pathways
+fgsea_results <- run_fgsea(
+  gmt_file_path = "data/m2.cp.v2023.1.Mm.symbols.gmt",
+  rnk_list      = rnk_list,
+  min_size      = 15,
+  max_size      = 500
+)
+
+# Preview results
+fgsea_results
 
 ```
 
 ```{r, fgsea results, echo=FALSE}
 #Display the results of the fgsea in a tibble sorted by padj (ascending)
-
+fgsea_results %>%
+  dplyr::select(-leadingEdge) %>%
+  dplyr::arrange(padj) %>%
+  tibble::as_tibble()
 ```
 ## 9. Plotting the top ten positive NES and top ten negative NES pathways
 
@@ -201,7 +274,9 @@ Color the bars by whether they have a positive or negative NES.
 ```{r, fgsea results plot, echo=FALSE, fig.cap = caption_9}
 #Plot the top ten pathways with both positive and negative NES (20 total)
 #Color the pathways by the sign of their NES (positive or negative)
+fgsea_plot <- top_pathways(fgsea_results, num_paths = 10)
 
+fgsea_plot
 
 ```
 
